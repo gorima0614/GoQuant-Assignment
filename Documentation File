@@ -1,0 +1,130 @@
+1. System Architecture
+-> Oracle Integration Diagram
+Price feeds sourced from Pyth Feed and Switchboard are processed by the Price Aggregator.
+
+The Consensus Price is then stored in Redis Cache.
+
+Prices are delivered to clients via the API.
+
+All price updates and history are stored in PostgreSQL for audit and analysis.
+
+Failover logic detects unhealthy or stale sources, automatically falling back to the healthiest or most recent source.​​
+
+-> Price Aggregation Flow
+Incoming raw prices are normalized and validated (e.g., timestamp staleness, confidence thresholds).
+
+Aggregator computes consensus (typically median) and rejects outliers based on deviation threshold.
+
+Prices are published to fast-access caches and persisted in the database.
+
+-> Failover Mechanisms
+Continuous health monitoring of oracle feeds (update frequency, latency, anomalies).
+
+Automated circuit breakers for sources with poor reliability, excessive deviations, or missing updates.
+
+Fallback to secondary or internal sources ensures ongoing price delivery.
+
+-> Data Flow & Caching
+Real-time consensus prices published via WebSocket and REST API.
+
+Redis used for low-latency price querying.
+
+PostgreSQL used for durable storage and historical queries.
+
+2. Oracle Integration
+Pyth Integration Details
+Connect to Pyth price feed accounts using Solana RPC and pyth_sdk_solana.
+
+Parse price, confidence, and exponent values.
+
+Enforce staleness (<30s) and confidence (< configured threshold).
+
+-> Switchboard Integration Details
+Connect to Switchboard aggregator accounts using Rust Switchboard SDK.
+
+Parse result data, check update timestamp and confidence.
+
+Multi-round support for robust update and consensus.
+
+-> Account Structure Explanations
+PriceData struct holds all price-relevant information, including normalization exponent, timestamp, and source enum.
+
+OracleConfig on-chain account maps symbol to oracle feed public keys and all operational thresholds.
+
+-> Price Normalization Methodology
+Prices are always normalized/scaled using their exponent before aggregation.
+
+All comparisons or statistical calculations are made on properly scaled values (e.g., price * 10^expo).
+
+3. Smart Contract Documentation
+Account Structures
+PriceData: Serialized struct for passing and storing price information within smart contracts.
+
+OracleConfig: Stores configuration per asset, including acceptable staleness, confidence, and deviation levels.
+
+-> Price Validation Logic
+Contracts validate incoming prices for staleness and acceptable confidence.
+
+Consensus logic ensures all integrated prices are within acceptable deviation from the median.
+
+-> Security Considerations
+All external accounts are validated by public key and symbol mapping.
+
+Contracts reject data not meeting staleness and confidence criteria.
+
+Price manipulation resistance via median/consensus logic and outlier detection.
+
+-> Oracle Account Requirements
+Price feeds and aggregator accounts must be initialized, funded, and mapped to OracleConfig.
+
+Proper authority and access checks enforced on update functions.
+
+4. Backend Service Documentation
+Module Architecture
+OracleManager: Handles subscriptions and health monitoring.
+
+PythClient/SwitchboardClient: Interfaces with specific oracle sources.
+
+PriceAggregator: Combines multiple feeds into consensus price.
+
+PriceCachePublisher: Stores prices in Redis, publishes updates, persists history.
+
+HealthMonitor: Monitors update frequency, confidence, and reliability.
+
+-> API Specifications
+GET /price/{symbol}: Returns latest consensus price for requested symbol.
+
+GET /history/{symbol}: Returns historical price data from PostgreSQL.
+
+WebSocket endpoint: Pushes real-time price updates to subscribers.
+
+-> WebSocket Protocols
+Clients can subscribe to streams for one or multiple symbols.
+
+Heartbeat messages, update intervals configurable.
+
+-> Configuration Parameters
+Source public keys, update intervals, staleness thresholds, confidence thresholds, Redis/Postgres connection strings (all environment config or config files).
+
+5. Operational Guide
+How to Add New Symbols
+Add new symbol entry in OracleConfig with corresponding Pyth/Switchboard feed Pubkeys.
+
+Update backend config to recognize and subscribe to new oracles.
+
+Deploy contract changes if required.
+
+-> Monitoring Oracle Health
+Use dashboard or logs to monitor health metrics (update intervals, confidence, reliability score).
+
+Alerts for too frequent staleness, confidence breaches, or large price jumps.
+
+-> Handling Oracle Outages
+Automatic fallback to alternative sources implemented in backend OracleManager.
+
+Manual overrides available via admin functions in smart contract and backend.
+
+-> Debugging Price Issues
+Log full trace of incoming prices, consensus logic, and aggregation outputs.
+
+Use health/status endpoints and contract admin queries to diagnose problems.
