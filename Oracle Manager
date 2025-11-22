@@ -1,0 +1,110 @@
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use futures_util::{SinkExt, StreamExt};
+use url::Url;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub struct OracleSource {
+    pub id: String,
+    pub ws_url: String,
+    pub last_update: Mutex<Instant>,         // last received update time
+    pub health: Mutex<bool>,                  // source health status
+    pub reconnect_attempts: Mutex<u32>,      // number of reconnect retries
+}
+
+pub struct OracleManager {
+    sources: Arc<Mutex<HashMap<String, OracleSource>>>,
+    // Additional fields like config, channels etc
+}
+
+impl OracleManager {
+    pub fn new() -> Self {
+        Self {
+            sources: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn add_source(&self, id: &str, ws_url: &str) {
+        let source = OracleSource {
+            id: id.to_string(),
+            ws_url: ws_url.to_string(),
+            last_update: Mutex::new(Instant::now()),
+            health: Mutex::new(true),
+            reconnect_attempts: Mutex::new(0),
+        };
+        self.sources.lock().await.insert(id.to_string(), source);
+    }
+
+    pub async fn start(&self) {
+        let sources = self.sources.clone();
+        // For each source, run subscription in separate async task
+        for (id, source) in sources.lock().await.iter() {
+            let source_clone = source.clone();
+            tokio::spawn(async move {
+                Self::manage_source_connection(source_clone).await;
+            });
+        }
+    }
+
+    async fn manage_source_connection(source: OracleSource) {
+        loop {
+            match connect_async(Url::parse(&source.ws_url).unwrap()).await {
+                Ok((mut ws_stream, _)) => {
+                    println!("Connected to oracle source {}", source.id);
+                    *source.health.lock().await = true;
+                    *source.reconnect_attempts.lock().await = 0;
+
+                    while let Some(msg) = ws_stream.next().await {
+                        match msg {
+                            Ok(Message::Text(text)) => {
+                                // Here parse price update and update last_update timestamp
+                                *source.last_update.lock().await = Instant::now();
+                                println!("Received update from {}: {}", source.id, text);
+                                // Process price update...
+                            }
+                            Ok(Message::Ping(p)) => {
+                                ws_stream.send(Message::Pong(p)).await.unwrap_or(());
+                            }
+                            Ok(Message::Close(_)) | Err(_) => {
+                                println!("Connection closed or error for {}", source.id);
+                                *source.health.lock().await = false;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error connecting to {}: {:?}", source.id, e);
+                    *source.health.lock().await = false;
+                }
+            }
+            // Implement reconnection backoff with circuit breaker
+            let mut attempts = source.reconnect_attempts.lock().await;
+            *attempts += 1;
+            if *attempts > 5 {
+                println!("Circuit breaker triggered for {}", source.id);
+                // Possibly wait longer or disable temporarily
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            } else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+
+    pub async fn check_health(&self) {
+        let timeout = Duration::from_secs(30);
+        let sources = self.sources.lock().await;
+        for (id, source) in sources.iter() {
+            let last_update = *source.last_update.lock().await;
+            let healthy = *source.health.lock().await;
+            if last_update.elapsed() > timeout || !healthy {
+                println!("Health warning: oracle {} is stale or unhealthy", id);
+                // Trigger alerts or switch fallback here
+            }
+        }
+    }
+}
