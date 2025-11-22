@@ -1,0 +1,91 @@
+use std::collections::HashMap;
+use tokio::time::{Instant, Duration};
+
+#[derive(Debug, Clone)]
+pub struct PriceData {
+    pub price: i64,
+    pub confidence: u64,
+    pub timestamp: i64,
+    pub source: String,
+}
+
+pub struct SourceHealthStatus {
+    pub last_update: Instant,
+    pub is_healthy: bool,
+    pub last_price: Option<i64>,
+    pub confidence_history: Vec<u64>,
+    pub failure_count: u32,
+}
+
+pub struct HealthMonitor {
+    sources: HashMap<String, SourceHealthStatus>,
+    max_stale_duration: Duration,
+    max_allowed_jump_bps: u64,   // e.g. 500 = 5% max allowed price jump
+    max_confidence_bps: u64,     // max confidence threshold
+}
+
+impl HealthMonitor {
+    pub fn new(max_stale_secs: u64, max_jump_bps: u64, max_confidence: u64) -> Self {
+        Self {
+            sources: HashMap::new(),
+            max_stale_duration: Duration::from_secs(max_stale_secs),
+            max_allowed_jump_bps: max_jump_bps,
+            max_confidence_bps: max_confidence,
+        }
+    }
+
+    pub fn update_price(&mut self, data: &PriceData) {
+        let now = Instant::now();
+        let entry = self.sources.entry(data.source.clone()).or_insert(SourceHealthStatus {
+            last_update: now,
+            is_healthy: true,
+            last_price: None,
+            confidence_history: vec![],
+            failure_count: 0,
+        });
+
+        // Update last update time
+        entry.last_update = now;
+
+        // Track confidence
+        entry.confidence_history.push(data.confidence);
+
+        // Detect large jumps compared to last price
+        if let Some(last_price) = entry.last_price {
+            let diff = if data.price > last_price { data.price - last_price } else { last_price - data.price };
+            let jump_bps = (diff as u128 * 10_000) / last_price.abs() as u128;
+            if jump_bps > self.max_allowed_jump_bps as u128 {
+                println!("Alert: Large price jump detected for source {}: {} bps", data.source, jump_bps);
+                entry.is_healthy = false;
+            }
+        }
+
+        // Check confidence
+        if data.confidence > self.max_confidence_bps {
+            println!("Alert: High confidence value for source {}: {}", data.source, data.confidence);
+            entry.is_healthy = false;
+        }
+
+        // Update last price
+        entry.last_price = Some(data.price);
+    }
+
+    pub fn check_staleness(&mut self) {
+        let now = Instant::now();
+        for (source, status) in self.sources.iter_mut() {
+            if now.duration_since(status.last_update) > self.max_stale_duration {
+                println!("Alert: Price data from source {} is stale", source);
+                status.is_healthy = false;
+                status.failure_count += 1;
+            } else {
+                // Reset failure count on healthy update
+                status.failure_count = 0;
+                status.is_healthy = true;
+            }
+        }
+    }
+
+    pub fn get_health_summary(&self) -> HashMap<String, bool> {
+        self.sources.iter().map(|(s, st)| (s.clone(), st.is_healthy)).collect()
+    }
+}
