@@ -1,0 +1,126 @@
+use anchor_lang::prelude::*;
+use pyth_sdk_solana::{load_price_feed_from_account_info, Price as PythPrice};
+use switchboard_v2::AggregatorAccount;
+use std::convert::TryInto;
+
+declare_id!("YourProgramIdHere1111111111111111111111111111111");
+
+#[program]
+pub mod perpetuals_oracle {
+    use super::*;
+
+    pub fn get_pyth_price(ctx: Context<GetPythPrice>, price_feed: Pubkey) -> Result<PriceData> {
+        let price_account_info = ctx.accounts.price_feed.to_account_info();
+        let price_feed_data = load_price_feed_from_account_info(&price_account_info)
+            .map_err(|_| ErrorCode::InvalidPriceFeed)?;
+        let current_time = Clock::get()?.unix_timestamp;
+
+        // Validate staleness (< 30 seconds)
+        if current_time - price_feed_data.timestamp > 30 {
+            return Err(error!(ErrorCode::PriceTooOld));
+        }
+
+        let price = price_feed_data.get_current_price()
+            .ok_or(error!(ErrorCode::InvalidPrice))?;
+        let conf = price_feed_data.get_current_confidence()
+            .ok_or(error!(ErrorCode::InvalidConfidence))?;
+
+        // Validate confidence threshold (example threshold)
+        if conf > 100 { // Adjust threshold as needed
+            return Err(error!(ErrorCode::ConfidenceTooHigh));
+        }
+
+        Ok(PriceData {
+            price,
+            confidence: conf,
+            timestamp: price_feed_data.timestamp,
+        })
+    }
+
+    pub fn get_switchboard_price(ctx: Context<GetSwitchboardPrice>, aggregator: Pubkey) -> Result<PriceData> {
+        let aggregator_account = AggregatorAccount::new(ctx.accounts.aggregator.clone());
+        let data = aggregator_account.load()?;
+
+        let current_time = Clock::get()?.unix_timestamp as u64;
+
+        // Check update timestamp
+        if current_time - data.latest_update > 30 {
+            return Err(error!(ErrorCode::PriceTooOld));
+        }
+
+        let result = data.current_result;
+        let confidence = data.confidence;
+
+        // Validate confidence level
+        if confidence > 100 { // Adjust accordingly
+            return Err(error!(ErrorCode::ConfidenceTooHigh));
+        }
+
+        Ok(PriceData {
+            price: result,
+            confidence,
+            timestamp: data.latest_update,
+        })
+    }
+
+    pub fn validate_price_consensus(ctx: Context<ValidatePrice>, prices: Vec<PriceData>) -> Result<u64> {
+        // Calculate median price
+        let mut price_values: Vec<u64> = prices.iter().map(|p| p.price).collect();
+        price_values.sort_unstable();
+
+        let mid = price_values.len() / 2;
+        let median = if price_values.len() % 2 == 0 {
+            (price_values[mid - 1] + price_values[mid]) / 2
+        } else {
+            price_values[mid]
+        };
+
+        // Validate that all prices are within 1% of median
+        for p in &prices {
+            let diff = if p.price > median {
+                p.price - median
+            } else {
+                median - p.price
+            };
+
+            let max_allowed = median / 100; // 1%
+            if diff > max_allowed {
+                return Err(error!(ErrorCode::PriceDeviationTooHigh));
+            }
+        }
+
+        Ok(median)
+    }
+}
+
+#[derive(Accounts)]
+pub struct GetPythPrice<'info> {
+    pub price_feed: AccountInfo<'info>,
+}
+#[derive(Accounts)]
+pub struct GetSwitchboardPrice<'info> {
+    pub aggregator: AccountInfo<'info>,
+}
+#[derive(Accounts)]
+pub struct ValidatePrice<'info> {}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Price feed account is invalid")]
+    InvalidPriceFeed,
+    #[msg("Price data is too old")]
+    PriceTooOld,
+    #[msg("Price value is invalid")]
+    InvalidPrice,
+    #[msg("Confidence interval too high")]
+    ConfidenceTooHigh,
+    #[msg("Price deviation from consensus too high")]
+    PriceDeviationTooHigh,
+}
+
+#[derive(Clone, AnchorSerialize, AnchorDeserialize)]
+pub struct PriceData {
+    pub price: u64,
+    pub confidence: u64,
+    pub timestamp: i64,
+}
