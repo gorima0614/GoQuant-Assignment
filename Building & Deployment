@@ -1,0 +1,15 @@
+ ## Anchor Program ##
+cd anchor-program
+anchor build
+anchor test    # Run unit and integration tests for smart contracts
+anchor deploy  # Deploy to devnet/testnet/mainnet
+
+## Backend Oracle Service ##
+cd backend-oracle-service
+cargo build --release
+cargo test     # Run backend module tests
+cargo run      # Start backend oracle manager, API, and WebSocket server
+
+## Database Setup ##
+psql -U <user> -d <dbname> -f migrations/schema.sql
+
